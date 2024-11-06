@@ -1,8 +1,17 @@
-cudatoolkit=10.1.243
-dgl=0.6
-ignite=0.4.2
-nltk=3.4.5
-python=3.7
-pytorch=1.5.0
-scikit-learn=0.22
-transformers=4.1.1
+# numpy
+# scipy
+# networkx
+# scikit-learn
+# nltk
+# transformers
+# scikit-learn
+# torch==2.4.1
+# torch-ignite
+# torchvision==0.19.1 
+# torchaudio==2.4.1
+# --index-url https://download.pytorch.org/whl/test/cu121
+# dgl==2.1.0+cu121 
+pip install numpy scipy networkx scikit-learn nltk transformers
+pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/test/cu121
+pip install  dgl -f https://data.dgl.ai/wheels/cu121/repo.html
+pip install pytorch-ignite 
