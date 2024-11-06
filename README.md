@@ -1,30 +1,71 @@
 # BertGCN
 This repo contains code for [BertGCN: Transductive Text Classification by Combining GCN and BERT](https://arxiv.org/abs/2105.05727).
 
-
-## Introduction
-
-In this work, we propose BertGCN, a model that combines large scale pretraining and transductive learning for text classification. BertGCN constructs a  heterogeneous graph over the dataset and represents documents as nodes using BERT representations. By jointly training the BERT and GCN modules within BertGCN, the proposed model is able to leverage the advantages of both worlds: large-scale pretraining which takes the advantage of the massive amount of raw data and transductive learning which jointly learns representations for both training data and unlabeled test data by propagating label influence through graph convolution. Experiments show that BertGCN achieves SOTA performances on a wide range of text classification datasets. 
-
-## Main Results
-|**Model** | **20NG** | **R8** | **R52** | **Ohsumed** | **MR** |
-| ------------ | ---- | ---- | ---- | ---- | ---- |
-| [*TextGCN*](https://arxiv.org/pdf/1809.05679.pdf) | 86.3 | 97.1 | 93.6 | 68.4 | 76.7 |
-| [*SGC*](https://arxiv.org/abs/1902.07153) | 88.5 | 97.2 | 94.0 | 68.5 | 75.9 |
-| [*BERT*](https://arxiv.org/abs/1810.04805) | 85.3 | 97.8 | 96.4 | 70.5 | 85.7 |
-| [*RoBERTa*](https://arxiv.org/abs/1907.11692) | 83.8 | 97.8 | 96.2 | 70.7 | 89.4 |
-| *BertGCN* | 89.3 | 98.1 | **96.6** | **72.8** | 86.0 |
-| *RoBERTaGCN* | **89.5** | **98.2** | 96.1 | **72.8** | **89.7**|
-| *BertGAT* | 87.4 | 97.8 | 96.5 | 71.2 | 86.5 |
-| *RoBERTaGAT* | 86.5 | 98.0 | 96.1 |  71.2 | 89.2 |
-
 ## Dependencies
+1. **Download CUDA 12.1** (Wajib)
+   - Unduh dan instal CUDA Toolkit 12.1 dari [NVIDIA CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit-archive).
+   - Pastikan Anda telah menambahkan path CUDA (`bin` dan `lib`) ke variabel lingkungan `PATH`.
 
-Create environment and install required packages for BertGCN using conda:
+2. **Clone Repository**
+   - Clone repository proyek ini menggunakan perintah berikut:
+     ```bash
+     git clone <URL_REPOSITORY>
+     ```
+   - Fetch branch terbaru dan switch ke branch `switch_to_pip`:
+     ```bash
+     git fetch origin
+     git checkout switch_to_pip
+     ```
 
-`conda create --name BertGCN --file requirements.txt -c default -c pytorch -c dglteam -c huggingface`
+3. **Download Python 3.11**
+   - Unduh dan instal **Python 3.11** dari [Python.org](https://www.python.org/downloads/).
 
-If the NVIDIA driver version does not support CUDA 10.1 you may edit requirements.txt to use older cudatooklit and the corresponding [dgl](https://www.dgl.ai/pages/start.html) instead.
+4. **Buat Virtual Environment**
+   - Pergi ke direktori proyek dan buat environment virtual menggunakan Python 3.11:
+     ```bash
+     "path\ke\python3.11" -m venv myvenv
+     ```
+   - Misalnya:
+     ```bash
+     "C:\Python311\python.exe" -m venv myvenv
+     ```
+
+5. **Aktifkan Virtual Environment**
+   - Aktifkan virtual environment yang baru saja dibuat:
+     - **Windows**:
+       ```bash
+       myvenv\Scripts\activate
+       ```
+     - **Linux/macOS**:
+       ```bash
+       source myvenv/bin/activate
+       ```
+
+6. **Instal Dependensi dari `requirements.txt`**
+   - Buka file `requirements.txt` dan instal setiap paket **satu per satu** dengan menggunakan perintah berikut:
+     ```bash
+     pip install <nama_paket>
+     ```
+   - Contoh:
+     ```bash
+     pip install torch==2.0.0+cu121
+     pip install transformers==4.34.0
+     pip install dgl==2.1.0+cu121
+     pip install torch-ignite==0.4.11
+     pip install numpy>=1.22
+     pip install scikit-learn>=1.0
+     pip install nltk>=3.6
+     ```
+
+7. **Verifikasi Instalasi**
+   - Pastikan semua pustaka telah terpasang dengan benar dengan menjalankan:
+     ```bash
+     pip list
+     ```
+   - Pastikan CUDA terdeteksi oleh PyTorch:
+     ```python
+     python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+     ```
 
 ## Usage
 
@@ -45,14 +86,3 @@ Trained BertGCN parameters can be downloaded [here](https://drive.google.com/fil
 ## Acknowledgement
 
 The data preprocess and graph construction are from [TextGCN](https://github.com/yao8839836/text_gcn)
-
-## Citation
-To appear in Findings of ACL 2021
-```angular2
-@article{lin2021bertgcn,
-  title={BertGCN: Transductive Text Classification by Combining GCN and BERT},
-  author={Lin, Yuxiao and Meng, Yuxian and Sun, Xiaofei and Han, Qinghong and Kuang, Kun and Li, Jiwei and Wu, Fei},
-  journal={arXiv preprint arXiv:2105.05727},
-  year={2021}
-}
-```
