@@ -58,9 +58,8 @@ logger.addHandler(fh)
 logger.setLevel(logging.INFO)
 
 # Define device for training
-cpu = th.device('cpu')
-gpu = th.device('cuda:0' if th.cuda.is_available() else 'cpu')
-logger.info('Using device: {}'.format(gpu))
+device = th.device('cuda' if th.cuda.is_available() else 'cpu')
+logger.info('Using device: {}'.format(device))
 
 # Log parsed arguments and checkpoint directory
 logger.info('Arguments:')
@@ -83,7 +82,7 @@ print("Testing size:", nb_test)
 print("Number of classes:", nb_class)
 
 # Instantiate model
-model = BertClassifier(pretrained_model=bert_init, nb_class=nb_class)
+model = BertClassifier(pretrained_model=bert_init, nb_class=nb_class).to(device)
 print("BertClassifier model instantiated with", bert_init)
 
 # Convert one-hot labels to class IDs
@@ -130,9 +129,8 @@ print("Optimizer and scheduler initialized.")
 def train_step(engine, batch):
     global model, optimizer
     model.train()
-    model = model.to(gpu)
     optimizer.zero_grad()
-    input_ids, attention_mask, label = [x.to(gpu) for x in batch]
+    input_ids, attention_mask, label = [x.to(device) for x in batch]
     y_pred = model(input_ids, attention_mask)
     y_true = label.type(th.long)
     loss = F.cross_entropy(y_pred, y_true)
@@ -155,8 +153,7 @@ def test_step(engine, batch):
     global model
     with th.no_grad():
         model.eval()
-        model = model.to(gpu)
-        input_ids, attention_mask, label = [x.to(gpu) for x in batch]
+        input_ids, attention_mask, label = [x.to(device) for x in batch]
         y_pred = model(input_ids, attention_mask)
         print(f"Test step - Batch Size: {input_ids.shape[0]}")
         return y_pred, label
