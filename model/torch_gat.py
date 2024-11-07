@@ -1,17 +1,6 @@
-"""
-Graph Attention Networks in DGL using SPMV optimization.
-References
-----------
-Paper: https://arxiv.org/abs/1710.10903
-Author's code: https://github.com/PetarV-/GAT
-Pytorch implementation: https://github.com/Diego999/pyGAT
-"""
-
 import torch
 import torch.nn as nn
-import dgl.function as fn
-from dgl.nn import GATConv
-
+from torch_geometric.nn import GATConv
 
 class GAT(nn.Module):
     def __init__(self,
@@ -24,31 +13,57 @@ class GAT(nn.Module):
                  feat_drop=0,
                  attn_drop=0,
                  negative_slope=0.2,
-                 residual=False
-    ):
+                 residual=False):
         super(GAT, self).__init__()
         self.num_layers = num_layers
         self.gat_layers = nn.ModuleList()
         self.activation = activation
-        # input projection (no residual)
-        self.gat_layers.append(GATConv(
-            in_dim, num_hidden, heads[0],
-            feat_drop, attn_drop, negative_slope, False, self.activation))
-        # hidden layers
-        for l in range(1, num_layers):
-            # due to multi-head, the in_dim = num_hidden * num_heads
-            self.gat_layers.append(GATConv(
-                num_hidden * heads[l-1], num_hidden, heads[l],
-                feat_drop, attn_drop, negative_slope, residual, self.activation))
-        # output projection
-        self.gat_layers.append(GATConv(
-            num_hidden * heads[-2], num_classes, heads[-1],
-            feat_drop, attn_drop, negative_slope, residual, None))
 
-    def forward(self, inputs, g):
-        h = inputs
+        # Input layer
+        self.gat_layers.append(GATConv(
+            in_channels=in_dim,
+            out_channels=num_hidden,
+            heads=heads[0],
+            dropout=attn_drop,
+            negative_slope=negative_slope,
+            concat=True,  # For multi-head, concatenate output from each head
+            bias=True,
+        ))
+
+        # Hidden layers
+        for l in range(1, num_layers):
+            # The input dimension for hidden layers = num_hidden * num_heads (from previous layer)
+            self.gat_layers.append(GATConv(
+                in_channels=num_hidden * heads[l - 1],
+                out_channels=num_hidden,
+                heads=heads[l],
+                dropout=attn_drop,
+                negative_slope=negative_slope,
+                concat=True,
+                bias=True,
+            ))
+
+        # Output layer
+        self.gat_layers.append(GATConv(
+            in_channels=num_hidden * heads[-2],
+            out_channels=num_classes,
+            heads=heads[-1],
+            dropout=attn_drop,
+            negative_slope=negative_slope,
+            concat=False,  # Do not concatenate at the final layer
+            bias=True,
+        ))
+
+    def forward(self, x, edge_index):
+        h = x
+        # Apply GAT layers
         for l in range(self.num_layers):
-            h = self.gat_layers[l](g, h).flatten(1)
-        # output projection
-        logits = self.gat_layers[-1](g, h).mean(1)
+            h = self.gat_layers[l](h, edge_index)
+            if l != self.num_layers - 1:
+                h = h.flatten(1)  # Flatten for multi-head concat and apply activation
+                if self.activation is not None:
+                    h = self.activation(h)
+        
+        # Output layer (no activation)
+        logits = self.gat_layers[-1](h, edge_index).mean(1)
         return logits

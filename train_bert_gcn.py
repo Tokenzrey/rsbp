@@ -17,6 +17,8 @@ import logging
 from datetime import datetime
 from torch.optim import lr_scheduler
 from model import BertGCN, BertGAT
+from torch_geometric.data import Data as PyGData
+from torch_geometric.utils import from_scipy_sparse_matrix
 
 # Membuat parser untuk menerima parameter dari command line
 parser = argparse.ArgumentParser()
@@ -186,6 +188,20 @@ doc_mask = train_mask + val_mask + test_mask  # Menggabungkan mask untuk node do
 # Membangun graf DGL dari adjacency matrix
 # Normalisasi adjacency matrix dengan menambahkan self-loop
 adj_norm = normalize_adj(adj + sp.eye(adj.shape[0]))
+
+# Convert adjacency matrix to a PyG graph data object
+edge_index, edge_weight = from_scipy_sparse_matrix(adj_norm.astype('float32'))
+graph_data = Data(edge_index=edge_index, edge_attr=edge_weight)
+
+# Add features to graph data
+graph_data.input_ids = input_ids
+graph_data.attention_mask = attention_mask
+graph_data.label = th.LongTensor(y)
+graph_data.train_mask = th.BoolTensor(train_mask)
+graph_data.val_mask = th.BoolTensor(val_mask)
+graph_data.test_mask = th.BoolTensor(test_mask)
+graph_data.label_train = th.LongTensor(y_train)
+graph_data.cls_feats = th.zeros((graph_data.num_nodes, model.feat_dim))
 
 # Mengonversi adjacency matrix yang sudah ternormalisasi menjadi objek graf DGL
 # Setiap edge akan memiliki atribut 'edge_weight' yang menunjukkan bobot antar node

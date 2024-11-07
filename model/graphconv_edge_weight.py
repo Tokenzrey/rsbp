@@ -1,83 +1,68 @@
-from dgl.nn.pytorch import GraphConv
-from dgl import function as fn
-from dgl.base import DGLError
-from dgl.utils import expand_as_pair
-import torch as th
+import torch
+from torch_geometric.nn import MessagePassing
+from torch_geometric.utils import add_self_loops, degree
 
-class GraphConvEdgeWeight(GraphConv):
+class GraphConvEdgeWeight(MessagePassing):
+    def __init__(self, in_channels, out_channels, allow_zero_in_degree=False, norm="both", bias=True, activation=None):
+        super(GraphConvEdgeWeight, self).__init__(aggr='add')  # PyG uses 'add' by default for summing messages.
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.allow_zero_in_degree = allow_zero_in_degree
+        self.norm = norm
+        self.activation = activation
 
-    def forward(self, graph, feat,  weight=None, edge_weights=None):
-        with graph.local_scope():
-            if not self._allow_zero_in_degree:
-                if (graph.in_degrees() == 0).any():
-                    raise DGLError('There are 0-in-degree nodes in the graph, '
-                                   'output for those nodes will be invalid. '
-                                   'This is harmful for some applications, '
-                                   'causing silent performance regression. '
-                                   'Adding self-loop on the input graph by '
-                                   'calling `g = dgl.add_self_loop(g)` will resolve '
-                                   'the issue. Setting ``allow_zero_in_degree`` '
-                                   'to be `True` when constructing this module will '
-                                   'suppress the check and let the code run.')
+        self.weight = torch.nn.Parameter(torch.Tensor(in_channels, out_channels))
+        if bias:
+            self.bias = torch.nn.Parameter(torch.Tensor(out_channels))
+        else:
+            self.register_parameter('bias', None)
 
-            # (BarclayII) For RGCN on heterogeneous graphs we need to support GCN on bipartite.
-            feat_src, feat_dst = expand_as_pair(feat, graph)
-            if self._norm == 'both':
-                degs = graph.out_degrees().float().clamp(min=1)
-                norm = th.pow(degs, -0.5)
-                shp = norm.shape + (1,) * (feat_src.dim() - 1)
-                norm = th.reshape(norm, shp)
-                feat_src = feat_src * norm
+        torch.nn.init.xavier_uniform_(self.weight)
+        if self.bias is not None:
+            torch.nn.init.zeros_(self.bias)
 
-            if weight is not None:
-                if self.weight is not None:
-                    raise DGLError('External weight is provided while at the same time the'
-                                   ' module has defined its own weight parameter. Please'
-                                   ' create the module with flag weight=False.')
-            else:
-                weight = self.weight
+    def forward(self, x, edge_index, edge_weight=None):
+        if not self.allow_zero_in_degree and torch.any(degree(edge_index[1]) == 0):
+            raise ValueError('There are 0-in-degree nodes in the graph. '
+                             'This is harmful for some applications, '
+                             'causing silent performance regression. '
+                             'Consider adding self-loops or setting allow_zero_in_degree to True.')
 
-            if self._in_feats > self._out_feats:
-                # mult W first to reduce the feature size for aggregation.
-                if weight is not None:
-                    feat_src = th.matmul(feat_src, weight)
-                graph.srcdata['h'] = feat_src
-                if edge_weights is None:
-                    graph.update_all(fn.copy_src(src='h', out='m'),
-                                     fn.sum(msg='m', out='h'))
-                else:
-                    graph.edata['a'] = edge_weights
-                    graph.update_all(fn.u_mul_e('h', 'a', 'm'),
-                                     fn.sum(msg='m', out='h'))
-                rst = graph.dstdata['h']
-            else:
-                # aggregate first then mult W
-                graph.srcdata['h'] = feat_src
-                if edge_weights is None:
-                    graph.update_all(fn.copy_src(src='h', out='m'),
-                                     fn.sum(msg='m', out='h'))
-                else:
-                    graph.edata['a'] = edge_weights
-                    graph.update_all(fn.u_mul_e('h', 'a', 'm'),
-                                     fn.sum(msg='m', out='h'))
-                rst = graph.dstdata['h']
-                if weight is not None:
-                    rst = th.matmul(rst, weight)
+        # Add self-loops to handle 0-in-degree nodes
+        edge_index, edge_weight = add_self_loops(edge_index, edge_weight, fill_value=1.0, num_nodes=x.size(0))
 
-            if self._norm != 'none':
-                degs = graph.in_degrees().float().clamp(min=1)
-                if self._norm == 'both':
-                    norm = th.pow(degs, -0.5)
-                else:
-                    norm = 1.0 / degs
-                shp = norm.shape + (1,) * (feat_dst.dim() - 1)
-                norm = th.reshape(norm, shp)
-                rst = rst * norm
+        # Normalize node features
+        if self.norm == 'both':
+            row, col = edge_index
+            deg = degree(row, x.size(0), dtype=x.dtype)
+            deg_inv_sqrt = deg.pow(-0.5)
+            norm = deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
+        elif self.norm == 'left':
+            row, col = edge_index
+            deg = degree(row, x.size(0), dtype=x.dtype)
+            deg_inv = deg.pow(-1)
+            norm = deg_inv[row] * edge_weight
+        else:
+            norm = edge_weight
 
-            if self.bias is not None:
-                rst = rst + self.bias
+        # Apply linear transformation
+        x = torch.matmul(x, self.weight)
 
-            if self._activation is not None:
-                rst = self._activation(rst)
+        # Start propagating messages
+        out = self.propagate(edge_index, x=x, edge_weight=norm)
 
-            return rst
+        # Add bias if present
+        if self.bias is not None:
+            out = out + self.bias
+
+        # Apply activation if present
+        if self.activation is not None:
+            out = self.activation(out)
+
+        return out
+
+    def message(self, x_j, edge_weight):
+        return x_j if edge_weight is None else edge_weight.view(-1, 1) * x_j
+
+    def __repr__(self):
+        return '{}({}, {})'.format(self.__class__.__name__, self.in_channels, self.out_channels)
