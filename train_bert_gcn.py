@@ -119,7 +119,7 @@ logger.setLevel(logging.INFO)
 
 # Menentukan perangkat yang digunakan untuk pelatihan: CPU atau GPU (jika tersedia)
 cpu = th.device('cpu')
-gpu = th.device('cuda:0')
+gpu = th.device('cuda:0') if th.cuda.is_available() else th.device('cpu')
 
 # Menampilkan argumen yang digunakan dan direktori checkpoint ke dalam log
 logger.info('arguments:')
@@ -191,7 +191,8 @@ adj_norm = normalize_adj(adj + sp.eye(adj.shape[0]))
 
 # Convert adjacency matrix to a PyG graph data object
 edge_index, edge_weight = from_scipy_sparse_matrix(adj_norm.astype('float32'))
-graph_data = Data(edge_index=edge_index, edge_attr=edge_weight)
+# Membuat objek graf PyTorch Geometric
+graph_data = PyGData(edge_index=edge_index, edge_attr=edge_weight)
 
 # Add features to graph data
 graph_data.input_ids = input_ids
@@ -203,29 +204,14 @@ graph_data.test_mask = th.BoolTensor(test_mask)
 graph_data.label_train = th.LongTensor(y_train)
 graph_data.cls_feats = th.zeros((graph_data.num_nodes, model.feat_dim))
 
-# Mengonversi adjacency matrix yang sudah ternormalisasi menjadi objek graf DGL
-# Setiap edge akan memiliki atribut 'edge_weight' yang menunjukkan bobot antar node
-g = dgl.from_scipy(adj_norm.astype('float32'), eweight_name='edge_weight')
-
-# Menambahkan fitur ke setiap node dalam graf
-# 'input_ids' dan 'attention_mask' merupakan input untuk BERT
-g.ndata['input_ids'], g.ndata['attention_mask'] = input_ids, attention_mask
-
-# 'label', 'train', 'val', dan 'test' adalah label dan mask untuk tiap node, untuk mengidentifikasi
-# node-node mana yang digunakan untuk training, validation, dan testing
-g.ndata['label'], g.ndata['train'], g.ndata['val'], g.ndata['test'] = \
-    th.LongTensor(y), th.FloatTensor(train_mask), th.FloatTensor(val_mask), th.FloatTensor(test_mask)
-
-# 'label_train' adalah label khusus untuk node training
-g.ndata['label_train'] = th.LongTensor(y_train)
-
-# 'cls_feats' digunakan untuk menyimpan fitur yang dihasilkan dari BERT
-# Fitur ini akan diperbarui selama pelatihan, dan diinisialisasi dengan nol
-g.ndata['cls_feats'] = th.zeros((nb_node, model.feat_dim))
+logger.info(f'Jumlah node: {graph_data.num_nodes}')
+logger.info(f'Jumlah edge: {graph_data.num_edges}')
+if graph_data.num_nodes == 0 or graph_data.num_edges == 0:
+    raise ValueError("Graph data is empty. Please check adjacency matrix and features.")
 
 # Menampilkan informasi tentang graf yang telah dibuat
-logger.info('graph information:')
-logger.info(str(g))
+logger.info('graph information (PyTorch Geometric):')
+logger.info(str(graph_data))
 
 # Membuat index loader untuk membagi node-node dokumen ke dalam subset training, validation, dan testing
 
@@ -238,21 +224,21 @@ test_idx = Data.TensorDataset(th.arange(nb_node-nb_test, nb_node, dtype=th.long)
 doc_idx = Data.ConcatDataset([train_idx, val_idx, test_idx])
 
 # Membuat DataLoader untuk subset training dengan shuffle diaktifkan
-idx_loader_train = Data.DataLoader(train_idx, batch_size=batch_size, shuffle=True)
+idx_loader_train = Data.DataLoader(train_idx, batch_size=batch_size, shuffle=False)
 
 # Membuat DataLoader untuk subset validation dan test tanpa shuffle
 idx_loader_val = Data.DataLoader(val_idx, batch_size=batch_size)
 idx_loader_test = Data.DataLoader(test_idx, batch_size=batch_size)
 
 # Membuat DataLoader untuk seluruh dokumen (train, val, test) dengan shuffle diaktifkan
-idx_loader = Data.DataLoader(doc_idx, batch_size=batch_size, shuffle=True)
+idx_loader = Data.DataLoader(doc_idx, batch_size=batch_size, shuffle=False)
 
 # Fungsi untuk memperbarui fitur node dokumen dengan output embedding dari BERT
 def update_feature():
-    global model, g, doc_mask
+    global model, graph_data, doc_mask
     # Menggunakan batch besar dan tanpa gradien untuk mempercepat proses
     dataloader = Data.DataLoader(
-        Data.TensorDataset(g.ndata['input_ids'][doc_mask], g.ndata['attention_mask'][doc_mask]),
+        Data.TensorDataset(graph_data.input_ids[doc_mask], graph_data.attention_mask[doc_mask]),
         batch_size=1024
     )
     with th.no_grad():
@@ -268,11 +254,9 @@ def update_feature():
             cls_list.append(output.cpu())
         # Menggabungkan embedding [CLS] dari semua batch
         cls_feat = th.cat(cls_list, axis=0)
-    # Memindahkan graf ke CPU untuk memperbarui fitur tanpa menempati memori GPU
-    g = g.to(cpu)
     # Memperbarui fitur CLS untuk node dokumen yang ada di `doc_mask`
-    g.ndata['cls_feats'][doc_mask] = cls_feat
-    return g
+    graph_data.cls_feats[doc_mask] = cls_feat
+    return graph_data
 
 # Menginisialisasi optimizer untuk parameter BERT, classifier, dan GCN
 # Learning rate untuk BERT dan classifier menggunakan bert_lr, sedangkan GCN menggunakan gcn_lr
@@ -287,23 +271,22 @@ optimizer = th.optim.Adam([
 scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[30], gamma=0.1)
 
 # Fungsi untuk satu langkah pelatihan
-# Mengambil batch data dan memperbarui parameter model berdasarkan loss
 def train_step(engine, batch):
-    global model, g, optimizer
+    global model, graph_data, optimizer
     model.train()  # Mengaktifkan mode pelatihan
     model = model.to(gpu)  # Memindahkan model ke GPU
-    g = g.to(gpu)          # Memindahkan graf ke GPU
+    graph_data = graph_data.to(gpu)  # Memindahkan graf ke GPU
     optimizer.zero_grad()  # Menginisialisasi gradien menjadi nol
     (idx, ) = [x.to(gpu) for x in batch]  # Memindahkan indeks batch ke GPU
 
     # Mengambil node yang termasuk dalam subset training berdasarkan train mask
-    train_mask = g.ndata['train'][idx].type(th.BoolTensor)
+    train_mask = graph_data.train_mask[idx].type(th.BoolTensor)
 
     # Menghitung prediksi model hanya untuk node yang masuk dalam subset training
-    y_pred = model(g, idx)[train_mask]
+    y_pred = model(graph_data, idx)[train_mask]
 
     # Mengambil label yang sesuai dengan node di subset training
-    y_true = g.ndata['label_train'][idx][train_mask]
+    y_true = graph_data.label_train[idx][train_mask]
 
     # Menghitung loss menggunakan negative log likelihood (NLL)
     loss = F.nll_loss(y_pred, y_true)
@@ -313,7 +296,7 @@ def train_step(engine, batch):
     optimizer.step()
 
     # Melepaskan fitur untuk menghemat memori
-    g.ndata['cls_feats'].detach_()
+    graph_data.cls_feats.detach_()
 
     # Mengambil nilai loss sebagai scalar untuk logging
     train_loss = loss.item()
@@ -328,36 +311,31 @@ def train_step(engine, batch):
             train_acc = 1  # Jika tidak ada node training, akurasi diatur ke 1
     return train_loss, train_acc  # Mengembalikan loss dan akurasi untuk logging
 
-
 # Membuat engine Ignite untuk menjalankan langkah pelatihan
 trainer = Engine(train_step)
 
-
 # Fungsi yang dipanggil setelah setiap epoch selesai
-# Mengupdate learning rate dan memperbarui fitur node dokumen
 @trainer.on(Events.EPOCH_COMPLETED)
 def reset_graph(trainer):
     scheduler.step()  # Menurunkan learning rate berdasarkan scheduler
     update_feature()  # Memperbarui fitur embedding untuk node dokumen
     th.cuda.empty_cache()  # Mengosongkan cache GPU untuk menghemat memori
 
-
 # Fungsi untuk satu langkah pengujian (tanpa pelatihan)
 def test_step(engine, batch):
-    global model, g
+    global model, graph_data
     with th.no_grad():  # Menjalankan mode evaluasi tanpa gradien
         model.eval()    # Mengaktifkan mode evaluasi
         model = model.to(gpu)  # Memindahkan model ke GPU
-        g = g.to(gpu)          # Memindahkan graf ke GPU
+        graph_data = graph_data.to(gpu)  # Memindahkan graf ke GPU
         (idx, ) = [x.to(gpu) for x in batch]  # Memindahkan indeks batch ke GPU
 
         # Menghitung prediksi model untuk node di batch tersebut
-        y_pred = model(g, idx)
+        y_pred = model(graph_data, idx)
 
         # Mengambil label sebenarnya untuk node yang diuji
-        y_true = g.ndata['label'][idx]
+        y_true = graph_data.label[idx]
         return y_pred, y_true  # Mengembalikan prediksi dan label sebenarnya
-
 
 # Membuat engine Ignite untuk menjalankan langkah pengujian
 evaluator = Engine(test_step)
@@ -417,7 +395,7 @@ def log_training_results(trainer):
 log_training_results.best_val_acc = 0
 
 # Memperbarui fitur node dokumen sebelum pelatihan dimulai
-g = update_feature()
+graph_data = update_feature()
 
 # Memulai proses pelatihan dengan engine trainer
 trainer.run(idx_loader, max_epochs=nb_epochs)
