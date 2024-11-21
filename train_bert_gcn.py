@@ -3,7 +3,7 @@ import torch as th
 from transformers import AutoModel, AutoTokenizer
 import torch.nn.functional as F
 from utils import *
-import dgl
+# import dgl
 import torch.utils.data as Data
 from ignite.engine import Events, create_supervised_evaluator, create_supervised_trainer, Engine
 from ignite.metrics import Accuracy, Loss
@@ -141,15 +141,9 @@ nb_train, nb_val, nb_test = train_mask.sum(), val_mask.sum(), test_mask.sum()  #
 nb_word = nb_node - nb_train - nb_val - nb_test  # Menghitung node kata dalam graf (bukan dokumen)
 nb_class = y_train.shape[1]           # Jumlah kelas, diambil dari dimensi kolom matriks one-hot label
 
-# Membuat model sesuai pilihan GCN atau GAT yang diatur dari argumen input
-if gcn_model == 'gcn':
-    # Jika menggunakan GCN
-    model = BertGCN(nb_class=nb_class, pretrained_model=bert_init, m=m, gcn_layers=gcn_layers,
+# Jika menggunakan GCN
+model = BertGCN(nb_class=nb_class, pretrained_model=bert_init, m=m, gcn_layers=gcn_layers,
                     n_hidden=n_hidden, dropout=dropout)
-else:
-    # Jika menggunakan GAT
-    model = BertGAT(nb_class=nb_class, pretrained_model=bert_init, m=m, gcn_layers=gcn_layers,
-                    heads=heads, n_hidden=n_hidden, dropout=dropout)
 
 # Memuat checkpoint BERT yang sudah di-finetune sebelumnya jika tersedia
 if pretrained_bert_ckpt is not None:
@@ -194,6 +188,8 @@ edge_index, edge_weight = from_scipy_sparse_matrix(adj_norm.astype('float32'))
 # Membuat objek graf PyTorch Geometric
 graph_data = PyGData(edge_index=edge_index, edge_attr=edge_weight)
 
+print("edge_weight")
+print(edge_weight)
 # Add features to graph data
 graph_data.input_ids = input_ids
 graph_data.attention_mask = attention_mask
@@ -203,6 +199,7 @@ graph_data.val_mask = th.BoolTensor(val_mask)
 graph_data.test_mask = th.BoolTensor(test_mask)
 graph_data.label_train = th.LongTensor(y_train)
 graph_data.cls_feats = th.zeros((graph_data.num_nodes, model.feat_dim))
+graph_data.edge_weight = graph_data.edge_attr
 
 logger.info(f'Jumlah node: {graph_data.num_nodes}')
 logger.info(f'Jumlah edge: {graph_data.num_edges}')
@@ -233,29 +230,42 @@ idx_loader_test = Data.DataLoader(test_idx, batch_size=batch_size)
 # Membuat DataLoader untuk seluruh dokumen (train, val, test) dengan shuffle diaktifkan
 idx_loader = Data.DataLoader(doc_idx, batch_size=batch_size, shuffle=False)
 
-# Fungsi untuk memperbarui fitur node dokumen dengan output embedding dari BERT
 def update_feature():
     global model, graph_data, doc_mask
+    
+    print("Memulai proses update fitur node...")
     # Menggunakan batch besar dan tanpa gradien untuk mempercepat proses
     dataloader = Data.DataLoader(
         Data.TensorDataset(graph_data.input_ids[doc_mask], graph_data.attention_mask[doc_mask]),
         batch_size=1024
     )
+    
     with th.no_grad():
-        # Memindahkan model ke GPU dan mengatur ke mode evaluasi
-        model = model.to(gpu)
+        # Mengatur model ke mode evaluasi (tanpa GPU)
         model.eval()
         cls_list = []
+        print("Model diatur ke mode evaluasi.")
+        
         # Mengiterasi setiap batch dokumen untuk menghasilkan embedding dari BERT
         for i, batch in enumerate(dataloader):
-            input_ids, attention_mask = [x.to(gpu) for x in batch]
+            print(f"Memproses batch {i+1}/{len(dataloader)}...")
+            input_ids, attention_mask = batch
+            print(f"input_ids shape: {input_ids.shape}, attention_mask shape: {attention_mask.shape}")
+            
             # Mengambil embedding dari [CLS] token di lapisan terakhir BERT untuk setiap dokumen
             output = model.bert_model(input_ids=input_ids, attention_mask=attention_mask)[0][:, 0]
-            cls_list.append(output.cpu())
+            print(f"Output [CLS] embedding shape: {output.shape}")
+            
+            cls_list.append(output)
+        
         # Menggabungkan embedding [CLS] dari semua batch
         cls_feat = th.cat(cls_list, axis=0)
+        print(f"Combined [CLS] features shape: {cls_feat.shape}")
+    
     # Memperbarui fitur CLS untuk node dokumen yang ada di `doc_mask`
     graph_data.cls_feats[doc_mask] = cls_feat
+    print("Fitur CLS diperbarui untuk semua node dokumen.")
+    
     return graph_data
 
 # Menginisialisasi optimizer untuk parameter BERT, classifier, dan GCN
@@ -270,33 +280,51 @@ optimizer = th.optim.Adam([
 # Scheduler untuk menurunkan learning rate setelah 30 epoch dengan faktor 0.1
 scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[30], gamma=0.1)
 
-# Fungsi untuk satu langkah pelatihan
 def train_step(engine, batch):
     global model, graph_data, optimizer
-    model.train()  # Mengaktifkan mode pelatihan
-    model = model.to(gpu)  # Memindahkan model ke GPU
-    graph_data = graph_data.to(gpu)  # Memindahkan graf ke GPU
+    print("Memulai langkah pelatihan...")
+
+    # Mengaktifkan mode pelatihan
+    model.train()  
     optimizer.zero_grad()  # Menginisialisasi gradien menjadi nol
-    (idx, ) = [x.to(gpu) for x in batch]  # Memindahkan indeks batch ke GPU
+    print("Gradien diinisialisasi.")
+
+    # Batch index langsung digunakan tanpa GPU
+    (idx,) = batch
+    print(f"Idx: {idx}, dtype: {idx.dtype}")
+    print(f"Batch index: {idx}")
 
     # Mengambil node yang termasuk dalam subset training berdasarkan train mask
     train_mask = graph_data.train_mask[idx].type(th.BoolTensor)
+    print(f"Train mask shape: {train_mask.shape}, jumlah node training: {train_mask.sum().item()}")
 
-    # Menghitung prediksi model hanya untuk node yang masuk dalam subset training
+    print(f"Graph data input IDs shape: {graph_data.input_ids.shape}")
+    print(f"Graph data attention mask shape: {graph_data.attention_mask.shape}")
+    print(f"Graph data labels shape: {graph_data.label_train.shape}")
+    print(f"Graph data cls_feats shape: {graph_data.cls_feats.shape}")
+
+    
+    # Memastikan tidak ada penggunaan GPU pada bagian ini
     y_pred = model(graph_data, idx)[train_mask]
+    print(f"Prediksi model dihitung. Shape: {y_pred.shape}")
 
     # Mengambil label yang sesuai dengan node di subset training
     y_true = graph_data.label_train[idx][train_mask]
+    print(f"Label sebenarnya diperoleh. Shape: {y_true.shape}")
 
     # Menghitung loss menggunakan negative log likelihood (NLL)
     loss = F.nll_loss(y_pred, y_true)
+    print(f"Loss dihitung: {loss.item()}")
 
     # Backpropagation: menghitung gradien dan memperbarui parameter model
     loss.backward()
+    print("Gradien dihitung.")
     optimizer.step()
+    print("Parameter model diperbarui.")
 
     # Melepaskan fitur untuk menghemat memori
     graph_data.cls_feats.detach_()
+    print("Fitur CLS dilepaskan dari computational graph.")
 
     # Mengambil nilai loss sebagai scalar untuk logging
     train_loss = loss.item()
@@ -304,11 +332,15 @@ def train_step(engine, batch):
     # Menghitung akurasi training tanpa menghitung gradien
     with th.no_grad():
         if train_mask.sum() > 0:  # Memastikan ada node yang termasuk dalam subset training
-            y_true = y_true.detach().cpu()  # Memindahkan label ke CPU
-            y_pred = y_pred.argmax(axis=1).detach().cpu()  # Memindahkan prediksi ke CPU dan mengambil kelas dengan nilai tertinggi
+            y_true = y_true.detach().cpu()  # Memastikan label ada di CPU
+            y_pred = y_pred.argmax(axis=1).detach().cpu()  # Memastikan prediksi ada di CPU dan mengambil kelas dengan nilai tertinggi
             train_acc = accuracy_score(y_true, y_pred)  # Menghitung akurasi
+            print(f"Akurasi training dihitung: {train_acc}")
         else:
             train_acc = 1  # Jika tidak ada node training, akurasi diatur ke 1
+            print("Tidak ada node untuk training. Akurasi diatur ke 1.")
+
+    print("Langkah pelatihan selesai.\n")
     return train_loss, train_acc  # Mengembalikan loss dan akurasi untuk logging
 
 # Membuat engine Ignite untuk menjalankan langkah pelatihan
@@ -325,10 +357,10 @@ def reset_graph(trainer):
 def test_step(engine, batch):
     global model, graph_data
     with th.no_grad():  # Menjalankan mode evaluasi tanpa gradien
-        model.eval()    # Mengaktifkan mode evaluasi
-        model = model.to(gpu)  # Memindahkan model ke GPU
-        graph_data = graph_data.to(gpu)  # Memindahkan graf ke GPU
-        (idx, ) = [x.to(gpu) for x in batch]  # Memindahkan indeks batch ke GPU
+        model.eval()  # Mengaktifkan mode evaluasi
+
+        # Tidak perlu memindahkan ke GPU, tetap gunakan batch secara langsung
+        (idx,) = batch  
 
         # Menghitung prediksi model untuk node di batch tersebut
         y_pred = model(graph_data, idx)
